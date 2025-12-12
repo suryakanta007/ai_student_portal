@@ -4,6 +4,7 @@ import { db } from "@/lib/prisma";
 import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { generateAIInsights } from "./dashboard";
+import { checkUser } from "@/lib/checkUser";
 
 export async function updateUser(data) {
   const { userId } = await auth();
@@ -26,17 +27,22 @@ export async function updateUser(data) {
           },
         });
 
-        // If industry doesn't exist, create it with default values
+        // If industry doesn't exist, try to create it with AI insights
         if (!industryInsight) {
-          const insights = await generateAIInsights(data.industry);
+          try {
+            const insights = await generateAIInsights(data.industry);
 
-          industryInsight = await db.industryInsight.create({
-            data: {
-              industry: data.industry,
-              ...insights,
-              nextUpdate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-            },
-          });
+            industryInsight = await tx.industryInsight.create({
+              data: {
+                industry: data.industry,
+                ...insights,
+                nextUpdate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+              },
+            });
+          } catch (aiError) {
+            console.warn("Failed to generate AI insights, skipping:", aiError.message);
+            // Continue without AI insights - user can still complete profile
+          }
         }
 
         // Now update the user
@@ -45,7 +51,8 @@ export async function updateUser(data) {
             id: user.id,
           },
           data: {
-            industry: data.industry,
+            // Only set industry if we have industryInsight (to satisfy foreign key)
+            ...(industryInsight ? { industry: data.industry } : {}),
             experience: data.experience,
             bio: data.bio,
             skills: data.skills,
@@ -71,21 +78,11 @@ export async function getUserOnboardingStatus() {
   const { userId } = await auth();
   if (!userId) throw new Error("Unauthorized");
 
-  const user = await db.user.findUnique({
-    where: { clerkUserId: userId },
-  });
-
-  if (!user) throw new Error("User not found");
-
   try {
-    const user = await db.user.findUnique({
-      where: {
-        clerkUserId: userId,
-      },
-      select: {
-        industry: true,
-      },
-    });
+    // checkUser will find or create the user automatically
+    const user = await checkUser();
+
+    if (!user) throw new Error("Failed to get user");
 
     return {
       isOnboarded: !!user?.industry,

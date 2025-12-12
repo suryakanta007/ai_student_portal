@@ -2,10 +2,7 @@
 
 import { db } from "@/lib/prisma";
 import { auth } from "@clerk/nextjs/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+import { getQuizQuestions } from "@/lib/quiz-questions";
 
 export async function generateQuiz() {
   const { userId } = await auth();
@@ -22,11 +19,9 @@ export async function generateQuiz() {
   if (!user) throw new Error("User not found");
 
   const prompt = `
-    Generate 10 technical interview questions for a ${
-      user.industry
-    } professional${
-    user.skills?.length ? ` with expertise in ${user.skills.join(", ")}` : ""
-  }.
+    Generate 10 technical interview questions for a ${user.industry
+    } professional${user.skills?.length ? ` with expertise in ${user.skills.join(", ")}` : ""
+    }.
     
     Each question should be multiple choice with 4 options.
     
@@ -44,17 +39,42 @@ export async function generateQuiz() {
   `;
 
   try {
-    const result = await model.generateContent(prompt);
-    const response = result.response;
-    const text = response.text();
-    const cleanedText = text.replace(/```(?:json)?\n?/g, "").trim();
-    const quiz = JSON.parse(cleanedText);
+    // Try real API first
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: prompt,
+                },
+              ],
+            },
+          ],
+        }),
+      }
+    );
 
-    return quiz.questions;
+    if (response.ok) {
+      const data = await response.json();
+      const text = data.candidates[0].content.parts[0].text;
+      const cleanedText = text.replace(/```(?:json)?\n?/g, "").trim();
+      const quiz = JSON.parse(cleanedText);
+      return quiz.questions;
+    }
   } catch (error) {
-    console.error("Error generating quiz:", error);
-    throw new Error("Failed to generate quiz questions");
+    console.error("AI API failed, using fallback questions:", error);
   }
+
+  // FALLBACK: Return smart questions based on user profile
+  console.log(`Using quiz questions for ${user.industry} with skills: ${user.skills?.join(", ")}`);
+  return getQuizQuestions(user.industry, user.skills);
 }
 
 export async function saveQuizResult(questions, answers, score) {
@@ -99,15 +119,15 @@ export async function saveQuizResult(questions, answers, score) {
       Don't explicitly mention the mistakes, instead focus on what to learn/practice.
     `;
 
-    try {
-      const tipResult = await model.generateContent(improvementPrompt);
-
-      improvementTip = tipResult.response.text().trim();
-      console.log(improvementTip);
-    } catch (error) {
-      console.error("Error generating improvement tip:", error);
-      // Continue without improvement tip if generation fails
-    }
+    // Skip AI improvement tip for now - API key issue
+    // try {
+    //   const tipResult = await model.generateContent(improvementPrompt);
+    //   improvementTip = tipResult.response.text().trim();
+    //   console.log(improvementTip);
+    // } catch (error) {
+    //   console.error("Error generating improvement tip:", error);
+    //   // Continue without improvement tip if generation fails
+    // }
   }
 
   try {
